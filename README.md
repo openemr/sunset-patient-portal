@@ -1,4 +1,4 @@
-wp_plugin_template
+sunset_patient_portal
 ==================
 
-A plugin template
+A plugin to serve as a patient portal for an EHR system
