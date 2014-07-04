@@ -243,7 +243,13 @@ function action_getpost($postid) {
       // below picks out the name as the first "word" of the description.
       if (!preg_match('/([a-zA-Z0-9_:]+)/', $flddata['desc_text'], $matches)) continue;
       $fldname = $matches[1];
-      $out['fields'][$fldname] = $selval['user_value'];
+      if (is_string($selval['user_value'])) {
+        // Ninja stupidly stores values encoded for HTML output.
+        $out['fields'][$fldname] = htmlspecialchars_decode($selval['user_value'], ENT_QUOTES | ENT_HTML401);
+      }
+      else {
+        $out['fields'][$fldname] = $selval['user_value'];
+      }
       $out['labels'][$fldname] = $flddata['label'];
     }
   }
