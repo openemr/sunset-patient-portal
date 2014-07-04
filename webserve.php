@@ -16,6 +16,12 @@ define('FORMS_METHOD', 'NINJA');
 $out = array('errmsg' => '');
 $action = $_REQUEST['action'];
 
+// These are the administrative settings for the Cartpauj PM plugin.
+// We need to know who its messaging administrator is. This is likely to
+// be the same as $_REQUEST['login'] but we cannot assume that.
+$adminOps = get_option('cartpaujPM_options');
+$admin_user_login = $adminOps['admin_user_login'];
+
 // While the password is sent to us as plain text, this transport interface
 // should always be encrypted via SSL (HTTPS). See also:
 // http://codex.wordpress.org/Function_Reference/wp_authenticate
@@ -35,12 +41,17 @@ else {
   if ('getupload'   == $action) action_getupload  ($_REQUEST['uploadid']                       ); else
   if ('delpost'     == $action) action_delpost    ($_REQUEST['postid']                         ); else
   if ('checkptform' == $action) action_checkptform($_REQUEST['patient'], $_REQUEST['form']     ); else
-  if ('adduser' == $action) action_adduser($_REQUEST['newlogin'], $_REQUEST['newpass'], $_REQUEST['newemail']); else
+  if ('getmessage'  == $action) action_getmessage ($_REQUEST['messageid']                      ); else
+  if ('getmsgup'    == $action) action_getmsgup   ($_REQUEST['uploadid']                       ); else
+  if ('delmessage'  == $action) action_delmessage ($_REQUEST['messageid']                      ); else
+  if ('adduser'     == $action) action_adduser($_REQUEST['newlogin'], $_REQUEST['newpass'], $_REQUEST['newemail']); else
+  if ('putmessage'  == $action) action_putmessage ($_REQUEST                                   ); else
   // More TBD.
   $out['errmsg'] = 'Action not recognized!';
 }
 
 // The HTTP response content is always a JSON-encoded array.
+// TBD: I think we want to user serialize() instead. Handles binary strings better.
 echo json_encode($out);
 
 function get_mime_type($filepath) {
@@ -56,14 +67,22 @@ function get_mime_type($filepath) {
   return $mimetype;
 }
 
+function convertToID($login) {
+  global $wpdb;
+  $result = $wpdb->get_var($wpdb->prepare("SELECT ID FROM {$wpdb->users} WHERE user_login = %s", $login));
+  if (!empty($result)) return $result;
+  return 0;
+}
+
 // Logic to process the "list" action.
 // For Ninja, a row for every form submission.
 //
 function action_list($date_from='', $date_to='') {
-  global $wpdb, $out;
+  global $wpdb, $out, $admin_user_login;
   $out['list'] = array();
-
+  $out['messages'] = array();
   if (FORMS_METHOD == 'NINJA') {
+    // Get list of requests.
     $query =
       "SELECT fs.id, fs.date_updated, u.user_login, f.data AS formdata " .
       "FROM {$wpdb->prefix}ninja_forms_subs AS fs " .
@@ -83,23 +102,55 @@ function action_list($date_from='', $date_to='') {
     $query = $wpdb->prepare($query, $qparms);
     if (empty($query)) {
       $out['errmsg'] = "Internal error: wpdb prepare() failed.";
+      return;
     }
-    else {
-      $rows = $wpdb->get_results($query, ARRAY_A);
-      foreach ($rows as $row) {
-        $formtype = '';
-        $formdata = unserialize($row['formdata']);
-        if (isset($formdata['form_title'])) $formtype = $formdata['form_title'];
-        $out['list'][] = array(
-          'postid'   => $row['id'],
-          'user'     => (isset($row['user_login']) ? $row['user_login'] : ''),
-          'datetime' => $row['date_updated'],
-          'type'     => $formtype,
-        );
-      }
+    $rows = $wpdb->get_results($query, ARRAY_A);
+    foreach ($rows as $row) {
+      $formtype = '';
+      $formdata = unserialize($row['formdata']);
+      if (isset($formdata['form_title'])) $formtype = $formdata['form_title'];
+      $out['list'][] = array(
+        'postid'   => $row['id'],
+        'user'     => (isset($row['user_login']) ? $row['user_login'] : ''),
+        'datetime' => $row['date_updated'],
+        'type'     => $formtype,
+      );
+    }
+    // Get list of messages also.
+    $query = "SELECT cm.id, cm.date, cm.message_title, " .
+      "uf.user_login AS from_login, ut.user_login AS to_login " .
+      "FROM {$wpdb->prefix}cartpauj_pm_messages AS cm " .
+      "LEFT JOIN $wpdb->users AS uf ON uf.ID = cm.from_user " .
+      "LEFT JOIN $wpdb->users AS ut ON ut.ID = cm.to_user " .
+      "WHERE (cm.from_del = 0 AND uf.user_login = %s OR " .
+      "cm.to_del = 0 AND ut.user_login = %s)";
+    $qparms = array($admin_user_login, $admin_user_login);
+    if ($date_from) {
+      $query .= " AND cm.date >= %s";
+      $qparms[] = "$date_from 00:00:00";
+    }
+    if ($date_to) {
+      $query .= " AND cm.date <= %s";
+      $qparms[] = "$date_to 23:59:59";
+    }
+    $query .= " ORDER BY cm.date";
+    $query = $wpdb->prepare($query, $qparms);
+    if (empty($query)) {
+      $out['errmsg'] = "Internal error: wpdb prepare() failed.";
+      return;
+    }
+    $rows = $wpdb->get_results($query, ARRAY_A);
+    foreach ($rows as $row) {
+      $out['messages'][] = array(
+        'messageid' => $row['id'],
+        'user'      => ($row['from_login'] == $admin_user_login ? $row['to_login'] : $row['from_login']),
+        'fromuser'  => $row['from_login'],
+        'touser'    => $row['to_login'],
+        'datetime'  => $row['date'],
+        'title'     => $row['message_title'],
+      );
     }
   }
-
 }
 
 // Logic to process the "getpost" action.
@@ -111,7 +162,6 @@ function action_getpost($postid) {
   global $wpdb, $out;
   $out['post'] = array();
   $out['uploads'] = array();
-
   if (FORMS_METHOD == 'NINJA') {
     // wp_ninja_forms_subs has one row for each submitted form.
     // wp_ninja_forms has one row for each defined form.
@@ -184,14 +234,12 @@ function action_getpost($postid) {
       $out['labels'][$fldname] = $flddata['label'];
     }
   }
-
 }
 
 // Logic to process the "delpost" action to delete a post.
 //
 function action_delpost($postid) {
   global $wpdb, $out;
-
   if (FORMS_METHOD == 'NINJA') {
     // If this form instance includes any file uploads, then delete the
     // uploaded files as well as the rows in wp_ninja_forms_uploads.
@@ -215,7 +263,6 @@ function action_delpost($postid) {
       $out['errmsg'] = "Delete failed for id '$postid'";
     }
   }
-
 }
 
 // Logic to process the "adduser" action to create a user as a patient.
@@ -265,7 +312,6 @@ function action_checkptform($patient, $form) {
     $row = $wpdb->get_row($queryp, ARRAY_A);
     $out['postid'] = empty($row['id']) ? '0' : $row['id'];
   }
-
 }
 
 // Logic to process the "getupload" action.
@@ -289,6 +335,162 @@ function action_getupload($uploadid) {
     $out['mimetype'] = get_mime_type($filepath);
     $out['datetime'] = $row['date_updated'];
     $out['contents'] = base64_encode($contents);
+  }
+}
+
+// Logic to process the "getmessage" action.
+// The $messageid argument identifies the message.
+//
+function action_getmessage($messageid) {
+  global $wpdb, $out, $admin_user_login;
+  $out['message'] = array();
+  $out['uploads'] = array();
+  $query = "SELECT cm.id, cm.date, cm.message_title, cm.message_contents, " .
+    "uf.user_login AS from_login, ut.user_login AS to_login " .
+    "FROM {$wpdb->prefix}cartpauj_pm_messages AS cm " .
+    "LEFT JOIN $wpdb->users AS uf ON uf.ID = cm.from_user " .
+    "LEFT JOIN $wpdb->users AS ut ON ut.ID = cm.to_user " .
+    "WHERE cm.id = %d";
+  $queryp = $wpdb->prepare($query, array($messageid));
+  if (empty($queryp)) {
+    $out['errmsg'] = "Internal error: \"$query\" \"$postid\"";
+    return;
+  }
+  $row = $wpdb->get_row($queryp, ARRAY_A);
+  if (empty($row)) {
+    $out['errmsg'] = "No messages matching: \"$messageid\"";
+    return;
+  }
+  $out['message'] = array(
+    'messageid' => $row['id'],
+    'user'      => ($row['from_login'] == $admin_user_login ? $row['to_login'] : $row['from_login']),
+    'fromuser'  => $row['from_login'],
+    'touser'    => $row['to_login'],
+    'datetime'  => $row['date'],
+    'title'     => $row['message_title'],
+    'contents'  => $row['message_contents'],
+  );
+  $query2 = "SELECT id, filename, mimetype " .
+    "FROM {$wpdb->prefix}cartpauj_pm_attachments " .
+    "WHERE message_id = %d ORDER BY filename, id";
+  $query2p = $wpdb->prepare($query2, array($messageid));
+  if (empty($query2p)) {
+    $out['errmsg'] = "Internal error: \"$query2\" \"$messageid\"";
+    return;
+  }
+  $msgrows = $wpdb->get_results($query2p, ARRAY_A);
+  foreach ($msgrows as $msgrow) {
+    $out['uploads'][] = array(
+      'filename' => $msgrow['filename'],
+      'mimetype' => $msgrow['mimetype'],
+      'id'       => $msgrow['id'],
+    );
+  }
+}
+
+// Logic to process the "getmsgup" action.
+// Returns filename, mimetype and contents for the specified upload ID.
+//
+function action_getmsgup($uploadid) {
+  global $wpdb, $out;
+  $query = "SELECT id, filename, mimetype, contents " .
+    "FROM {$wpdb->prefix}cartpauj_pm_attachments " .
+    "WHERE id = %d";
+  $row = $wpdb->get_row($wpdb->prepare($query, array($uploadid)), ARRAY_A);
+  $out['filename'] = $row['filename'];
+  $out['mimetype'] = $row['mimetype'];
+  $out['contents'] = base64_encode($row['contents']);
+}
+
+// Logic to process the "delmessage" action to delete a message.  It's not
+// physically deleted until both sender and recipient delete it.  Note that we
+// can delete (actually hide) a child message, but in WordPress that action is
+// not supported; there only a parent message can be deleted.  In either case
+// a physical delete also deletes all children and associated attachments.
+//
+function action_delmessage($messageid) {
+  global $wpdb, $out, $admin_user_login;
+  // Get message attributes so we can figure out what to do.
+  $query = "SELECT cm.from_del, cm.to_del, " .
+    "uf.user_login AS from_login, ut.user_login AS to_login " .
+    "FROM {$wpdb->prefix}cartpauj_pm_messages AS cm " .
+    "LEFT JOIN $wpdb->users AS uf ON uf.ID = cm.from_user " .
+    "LEFT JOIN $wpdb->users AS ut ON ut.ID = cm.to_user " .
+    "WHERE cm.id = %d";
+  $row = $wpdb->get_row($wpdb->prepare($query, array($messageid)), ARRAY_A);
+  if (empty($row)) {
+    $out['errmsg'] = "Cannot delete, there is no message with ID $messageid.";
+    return;
+  }
+  if ($row['from_login'] == $admin_user_login && $row['to_del'] > 0 ||
+      $row['to_login'] == $admin_user_login && $row['from_del'] > 0) {
+    // Other party has flagged it for deletion so purge the message, its
+    // children and all related attachments.
+    $wpdb->query($wpdb->prepare("DELETE FROM a " .
+      "USING {$wpdb->prefix}cartpauj_pm_messages AS m " .
+      "JOIN {$wpdb->prefix}cartpauj_pm_attachments AS a " .
+      "WHERE (m.id = %d OR m.parent_id = %d) AND a.message_id = m.id",
+      $messageid, $messageid));
+    $wpdb->query($wpdb->prepare("DELETE FROM " .
+      "{$wpdb->prefix}cartpauj_pm_messages WHERE id = %d OR parent_id = %d",
+      $messageid, $messageid));
+  }
+  else if ($row['from_login'] == $admin_user_login) {
+    // We are the sender, recipient has not yet deleted.
+    $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}cartpauj_pm_messages " .
+      "SET from_del = 1 WHERE id = %d", $messageid));
+  }
+  else if ($row['to_login'] == $admin_user_login) {
+    // We are the recipient, sender has not yet deleted.
+    $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}cartpauj_pm_messages " .
+      "SET to_del = 1 WHERE id = %d", $messageid));
+  }
+  else {
+    // This should not happen.
+    $out['errmsg'] = "Delete refused because '$admin_user_login' is not the " .
+      "sender or recipient of message $messageid.";
+  }
+}
+
+// Logic to process the "putmessage" action.
+// Sends a message to the designated user with an optional attachment.
+//
+function action_putmessage(&$args) {
+  global $wpdb, $out, $admin_user_login;
+  $sender = convertToID($admin_user_login);
+  if (!$sender) {
+    $out['errmsg'] = "No such sender '$admin_user_login'";
+    return;
+  }
+  $recipient = convertToID($args['user']);
+  if (!$recipient) {
+    $out['errmsg'] = "No such recipient '{$args['user']}'";
+    return;
+  }
+  $tmp = $wpdb->insert("{$wpdb->prefix}cartpauj_pm_messages", array(
+    'from_user'        => $sender,
+    'to_user'          => $recipient,
+    'message_title'    => $args['title'],
+    'message_contents' => $args['message'],
+    'last_sender'      => $sender,
+    'date'             => current_time('mysql', 1),
+    'last_date'        => current_time('mysql', 1),
+  ), array('%d', '%d', '%s', '%s', '%d', '%s', '%s'));
+  if ($tmp === false) {
+    $out['errmsg'] = "Message insert failed";
+    return;
+  }
+  if (!empty($args['contents'])) {
+    $message_id = $wpdb->insert_id;
+    $tmp = $wpdb->insert("{$wpdb->prefix}cartpauj_pm_attachments", array(
+      'message_id' => $message_id,
+      'filename'   => $args['filename'],
+      'mimetype'   => $args['mimetype'],
+      'contents'   => base64_decode($args['contents']),
+    ), array('%d', '%s', '%s', '%s'));
+    if ($tmp === false) {
+      $out['errmsg'] = "Attachment insert failed";
+    }
   }
 }
 
