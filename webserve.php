@@ -50,9 +50,22 @@ else {
   $out['errmsg'] = 'Action not recognized!';
 }
 
-// The HTTP response content is always a JSON-encoded array.
-// TBD: I think we want to user serialize() instead. Handles binary strings better.
-echo json_encode($out);
+// For JSON-over-HTTP we would echo json_encode($out) instead of the following.
+// However serialize() works better because it supports arbitrary binary data,
+// thus attachments do not have to be base64-encoded.
+
+$tmp = serialize($out);
+header('Content-Description: File Transfer');
+header('Content-Type: application/octet-stream');
+header('Content-Disposition: attachment; filename=cmsreply.bin');
+header('Content-Transfer-Encoding: binary');
+header('Expires: 0');
+header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+header('Pragma: public');
+header('Content-Length: ' . strlen($tmp));
+ob_clean();
+flush();
+echo $tmp;
 
 function get_mime_type($filepath) {
   if (function_exists('finfo_open')) {
@@ -334,7 +347,8 @@ function action_getupload($uploadid) {
     $out['filename'] = $data['user_file_name'];
     $out['mimetype'] = get_mime_type($filepath);
     $out['datetime'] = $row['date_updated'];
-    $out['contents'] = base64_encode($contents);
+    // $out['contents'] = base64_encode($contents);
+    $out['contents'] = $contents;
   }
 }
 
@@ -399,7 +413,8 @@ function action_getmsgup($uploadid) {
   $row = $wpdb->get_row($wpdb->prepare($query, array($uploadid)), ARRAY_A);
   $out['filename'] = $row['filename'];
   $out['mimetype'] = $row['mimetype'];
-  $out['contents'] = base64_encode($row['contents']);
+  // $out['contents'] = base64_encode($row['contents']);
+  $out['contents'] = $row['contents'];
 }
 
 // Logic to process the "delmessage" action to delete a message.  It's not
