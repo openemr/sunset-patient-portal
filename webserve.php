@@ -1,4 +1,5 @@
 <?php
+// Copyright 2014 Rod Roark
 //
 // For using the WordPress API from an external program such as this, see:
 // http://www.webopius.com/content/139/using-the-wordpress-api-from-pages-outside-of-wordpress
